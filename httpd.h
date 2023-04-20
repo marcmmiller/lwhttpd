@@ -16,13 +16,14 @@
 //
 class Httpd {
 public:
-  bool start() {
-    daemon_ = MHD_start_daemon(MHD_USE_DEBUG, 8080, NULL, NULL,
+  bool start(int port = 8080) {
+    daemon_ = MHD_start_daemon(MHD_USE_DEBUG, port, NULL, NULL,
                                &s_HandlerCb, this, MHD_OPTION_END);
     return daemon_ != nullptr;
   }
 
   bool run_wait(int millis) {
+    // TODO: use a proper select server and messageloop to allow async handlers
     return MHD_YES == MHD_run_wait(daemon_, 1000);
   }
 
@@ -32,9 +33,11 @@ public:
 
   class Request {
   public:
-    Request(MHD_Connection *connection, const char* url) :
+    Request(MHD_Connection *connection, const char* url, const char* method) :
       connection_(connection),
-      url_(url) { }
+      url_(url),
+      method_(method)
+    { }
 
     std::optional<std::string> arg(const std::string& key) {
       bool val;
@@ -56,6 +59,7 @@ public:
     }
 
     const std::string& url() const { return url_; }
+    const std::string& method() const { return method_; }
 
     std::ostream& os() {
       if (response_ == nullptr) {
@@ -84,6 +88,7 @@ public:
   private:
     MHD_Connection *connection_;
     std::string url_;
+    std::string method_;
 
     MHD_Response *response_ = nullptr;
     int output_pipefd;
@@ -138,10 +143,10 @@ private:
                        size_t *upload_data_size,
                        void **con_cls) {
     MHD_Result ret;
-    static const std::string hello { "<body>hello</body>\n" };
-
     if (nullptr == *con_cls) {
-      Request req(connection, url);
+      // TODO: allow the request object to live beyond the handler's lifetime
+      // to support async operations in the handler.
+      Request req(connection, url, method);
       for (auto &h : handlers_) {
         h(req);
       }
@@ -153,6 +158,7 @@ private:
       return ret;
     }
 
+    // TODO: handle POST requests
     std::cout << "(ignored)" << method << " " << url << " " << version << std::endl;
 
     return MHD_YES;

@@ -5,6 +5,9 @@
 
 using namespace std;
 
+//
+// Sample (test case) for server.
+//
 int main(int argc, char *argv[]) {
   std::map<std::string, std::string> map;
 
@@ -20,7 +23,6 @@ int main(int argc, char *argv[]) {
   });
 
   h.add("/put", [&](Httpd::Request& req) {
-    cout << "put!!" << endl;
     auto key = req.arg("key");
     auto val = req.arg("val");
     req.os() << "This is the <b>best</b> httpd class ever." << endl
