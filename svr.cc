@@ -14,12 +14,17 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  h.add([&](Httpd::Request& req) {
+  h.use([&](Httpd::Request& req) {
     cout << "logging " << req.url() << endl;
     return true;
   });
 
-  h.add("/put", [&](Httpd::Request& req) {
+  h.use("/", [&](Httpd::Request& req) {
+    req.os() << "respnse\n";
+    return true;
+  });
+
+  h.use("/put", [&](Httpd::Request& req) {
     cout << "put!!" << endl;
     auto key = req.arg("key");
     auto val = req.arg("val");
@@ -35,7 +40,7 @@ int main(int argc, char *argv[]) {
     return true;
   });
 
-  h.add("/get", [&](Httpd::Request& req) {
+  h.use("/get", [&](Httpd::Request& req) {
     auto key = req.arg("key");
 
     if (auto f = map.find(*key); key && f != map.end()) {
