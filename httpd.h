@@ -22,13 +22,14 @@
 //
 class Httpd {
 public:
-  bool start() {
-    daemon_ = MHD_start_daemon(MHD_USE_DEBUG | MHD_ALLOW_SUSPEND_RESUME, 8080,
+  bool start(int port = 8080) {
+    daemon_ = MHD_start_daemon(MHD_USE_DEBUG | MHD_ALLOW_SUSPEND_RESUME, port,
                                NULL, NULL, &s_HandlerCb, this, MHD_OPTION_END);
     return daemon_ != nullptr;
   }
 
   bool run_wait(int millis) {
+    // TODO: use a proper select server and messageloop to allow async handlers
     return MHD_YES == MHD_run_wait(daemon_, 1000);
   }
 
@@ -40,7 +41,9 @@ public:
   public:
     Request(MHD_Connection *connection, const std::string& url) :
       connection_(connection),
-      url_(url) { }
+      url_(url),
+      method_(method)
+    { }
 
     std::optional<std::string> arg(const std::string& key) {
       bool val;
@@ -68,6 +71,7 @@ public:
     }
 
     const std::string& url() const { return url_; }
+    const std::string& method() const { return method_; }
 
     // TODO: if this method isn't called then the response is never created and
     // it's infinite loop time
@@ -114,6 +118,7 @@ public:
     friend class Httpd;
     MHD_Connection *connection_;
     std::string url_;
+    std::string method_;
 
     MHD_Response *response_ = nullptr;
     MHD_PostProcessor *pp_ = nullptr;

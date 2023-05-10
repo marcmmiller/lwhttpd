@@ -5,6 +5,9 @@
 
 using namespace std;
 
+//
+// Sample (test case) for server.
+//
 int main(int argc, char *argv[]) {
   std::map<std::string, std::string> map;
 
