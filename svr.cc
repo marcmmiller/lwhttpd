@@ -23,7 +23,7 @@ int main(int argc, char *argv[]) {
   });
 
   h.use("/", [&](Httpd::Request& req) {
-    req.os() << "respnse\n";
+    req.os() << "response\n";
     return true;
   });
 
@@ -60,8 +60,7 @@ int main(int argc, char *argv[]) {
 
   printf("running...\n");
 
-  for (bool b = true; b = h.run_wait(1000); b)
-    ;
+  h.run();
 
   h.stop();
   return 0;
