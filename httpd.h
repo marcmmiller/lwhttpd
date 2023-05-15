@@ -8,11 +8,13 @@
 #include <optional>
 #include <map>
 #include <memory>
+#include <queue>
 #include <variant>
 #include <vector>
 
 #include <ext/stdio_filebuf.h>
 #include <microhttpd.h>
+#include <sys/eventfd.h>
 
 //
 // microhttpd is a fever dream of an API.  This modern C++ wrapper (hopefully)
@@ -22,15 +24,74 @@
 //
 class Httpd {
 public:
+  Httpd() : msgloop_(this) {}
+
   bool start(int port = 8080) {
     daemon_ = MHD_start_daemon(MHD_USE_DEBUG | MHD_ALLOW_SUSPEND_RESUME, port,
                                NULL, NULL, &s_HandlerCb, this, MHD_OPTION_END);
     return daemon_ != nullptr;
   }
 
-  bool run_wait(int millis) {
-    // TODO: use a proper select server and messageloop to allow async handlers
-    return MHD_YES == MHD_run_wait(daemon_, 1000);
+  class MhdMessageloop {
+  public:
+    MhdMessageloop(Httpd* parent) {
+      parent_ = parent;
+      efd_ = eventfd(0, 0);
+    }
+
+    bool run() {
+      do {
+        fd_set read_fds, write_fds, except_fds;
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        FD_ZERO(&except_fds);
+        MHD_socket max;
+        if (MHD_YES !=
+            MHD_get_fdset(parent_->daemon_, &read_fds, &write_fds, &except_fds, &max))
+          break;
+
+        FD_SET(efd_, &read_fds);
+
+        struct timeval tv = { 0 };
+        MHD_UNSIGNED_LONG_LONG mhd_timeout;
+        if (MHD_get_timeout(parent_->daemon_, &mhd_timeout) == MHD_YES) {
+          if (((MHD_UNSIGNED_LONG_LONG)tv.tv_sec) < mhd_timeout / 1000LL) {
+            tv.tv_sec = mhd_timeout / 1000LL;
+            tv.tv_usec = (mhd_timeout - (tv.tv_sec * 1000LL)) * 1000LL;
+          }
+        }
+
+        if (-1 ==
+            select(max + 1, &read_fds, &write_fds, &except_fds, &tv)) {
+          if (EINTR != errno) abort();
+        }
+
+        if (FD_ISSET(efd_, &read_fds)) {
+          std::cout << "EFD is set! (you'll probably see this repeat until I read() from it)" << std::endl;
+        }
+
+        if (MHD_YES != MHD_run_from_select(parent_->daemon_, &read_fds,
+                                           &write_fds, &except_fds))
+          break;
+      } while (true);
+
+      return true;
+    }
+
+    Httpd* parent_;
+    std::queue<std::function<bool()>> q_;
+    int efd_;
+  };
+
+  MhdMessageloop& msgloop() { return msgloop_; }
+
+  bool run() {
+#ifdef RUN_WAIT
+    do { MHD_run_wait(daemon_, 9999); } while (true);
+    return true;
+#else
+    return msgloop_.run();
+#endif
   }
 
   void stop() {
@@ -39,7 +100,7 @@ public:
 
   class Request {
   public:
-    Request(MHD_Connection *connection, const std::string& url) :
+    Request(MHD_Connection *connection, const std::string& url, const std::string& method) :
       connection_(connection),
       url_(url),
       method_(method)
@@ -54,13 +115,10 @@ public:
                                                       key.c_str());
       if (c_str)
         return std::string(c_str);
-      else {
-        if (auto it = post_data_.find(key); it != post_data_.end()) {
-          return it->second;
-        } else {
-          return std::nullopt;
-        }
-      } 
+      else if (auto it = post_data_.find(key); it != post_data_.end())
+        return it->second;
+      else
+        return std::nullopt;
     }
 
     ~Request() {
@@ -209,7 +267,7 @@ private:
     bool is_post = method == MHD_HTTP_METHOD_POST;
 
     if (nullptr == *con_cls) {
-      req = std::make_shared<Request>(connection, url);
+      req = std::make_shared<Request>(connection, url, method);
 
       if (is_post) {
         req->create_post_processor();
@@ -246,9 +304,11 @@ private:
 
     req.reset();
     delete reinterpret_cast<std::shared_ptr<Request> *>(*con_cls);
+    *con_cls = nullptr;
 
     return MHD_YES;
   }
 
+    MhdMessageloop msgloop_;
     MHD_Daemon *daemon_;
   };
