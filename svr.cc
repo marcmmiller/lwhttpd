@@ -27,6 +27,14 @@ int main(int argc, char *argv[]) {
     return true;
   });
 
+  h.use("/delay", [&](std::shared_ptr<Httpd::Request> req) {
+    h.event_loop().set_timer(1000ms, [=] {
+      req->os() << "delayed response!\n";
+      return true;
+    });
+    return true;
+  });
+
   h.use("/put", [&](Httpd::Request& req) {
     cout << "put!!" << endl;
     auto key = req.arg("key");
@@ -58,7 +66,19 @@ int main(int argc, char *argv[]) {
     return true;
   });
 
-  printf("running...\n");
+  using namespace std::chrono_literals;
+  h.event_loop().set_timer(3000ms, [] {
+    std::cout << "hello from 3s callback land\n";
+    return true;
+  });
+
+  h.event_loop().set_timer(0ms, [] {
+    std::cout << "hello from immediate callback land\n";
+    return true;
+  });
+
+
+  std::cout << "running...\n" << std::flush;
 
   h.run();
 

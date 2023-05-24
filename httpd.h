@@ -1,13 +1,16 @@
 // -*- c++ -*-
 #pragma once
 
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <functional>
-#include <optional>
+#include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <variant>
 #include <vector>
@@ -24,7 +27,7 @@
 //
 class Httpd {
 public:
-  Httpd() : msgloop_(this) {}
+  Httpd() : event_loop_(this) {}
 
   bool start(int port = 8080) {
     daemon_ = MHD_start_daemon(MHD_USE_DEBUG | MHD_ALLOW_SUSPEND_RESUME, port,
@@ -32,9 +35,9 @@ public:
     return daemon_ != nullptr;
   }
 
-  class MhdMessageloop {
+  class EventLoop {
   public:
-    MhdMessageloop(Httpd* parent) {
+    EventLoop(Httpd* parent) {
       parent_ = parent;
       efd_ = eventfd(0, 0);
     }
@@ -45,29 +48,36 @@ public:
         FD_ZERO(&read_fds);
         FD_ZERO(&write_fds);
         FD_ZERO(&except_fds);
-        MHD_socket max;
+        MHD_socket max = 0;
         if (MHD_YES !=
             MHD_get_fdset(parent_->daemon_, &read_fds, &write_fds, &except_fds, &max))
           break;
 
         FD_SET(efd_, &read_fds);
+        max = std::max(max, efd_);
 
-        struct timeval tv = { 0 };
-        MHD_UNSIGNED_LONG_LONG mhd_timeout;
-        if (MHD_get_timeout(parent_->daemon_, &mhd_timeout) == MHD_YES) {
-          if (((MHD_UNSIGNED_LONG_LONG)tv.tv_sec) < mhd_timeout / 1000LL) {
-            tv.tv_sec = mhd_timeout / 1000LL;
-            tv.tv_usec = (mhd_timeout - (tv.tv_sec * 1000LL)) * 1000LL;
-          }
-        }
+        auto otv = compute_select_timeout();
+        struct timeval* ptv = otv.has_value() ? &otv.value() : nullptr;
 
         if (-1 ==
-            select(max + 1, &read_fds, &write_fds, &except_fds, &tv)) {
-          if (EINTR != errno) abort();
+            select(max + 1, &read_fds, &write_fds, &except_fds, ptv)
+            && EINTR != errno) {
+          std::cerr << "abort\n";
+          abort();
         }
 
         if (FD_ISSET(efd_, &read_fds)) {
-          std::cout << "EFD is set! (you'll probably see this repeat until I read() from it)" << std::endl;
+          eventfd_t count;
+          eventfd_read(efd_, &count);
+        }
+
+        auto now = std::chrono::steady_clock::now();
+
+        for (auto it = events_.cbegin(); it != events_.end(); ++it) {
+          if (now >= it->deadline) {
+            it->cb();
+            events_.erase(it--);
+          }
         }
 
         if (MHD_YES != MHD_run_from_select(parent_->daemon_, &read_fds,
@@ -78,19 +88,71 @@ public:
       return true;
     }
 
+    // Call back the supplied function in the event loop after timer_ms.
+    void set_timer(std::chrono::milliseconds ms, std::function<bool()>&& f) {
+      auto deadline = std::chrono::steady_clock::now() + ms;
+      events_.emplace_back(Event { deadline, f });
+      signal();
+    }
+
+    // Cause select() to exit.
+    void signal() {
+      eventfd_write(efd_, 1);
+    }
+
+  private:
     Httpd* parent_;
-    std::queue<std::function<bool()>> q_;
+
+    std::optional<struct timeval> compute_select_timeout() {
+      auto timeout = std::chrono::milliseconds::max();
+      bool has_timeout;
+      auto it = std::min_element(events_.begin(), events_.end(),
+                                 [](const Event &a, const Event &b) {
+                                   return a.deadline < b.deadline;
+                                 });
+
+      if (it != events_.end()) {
+        auto time_left = std::chrono::duration_cast<std::chrono::milliseconds>(it->deadline - std::chrono::steady_clock::now());
+        timeout = std::max(time_left, std::chrono::milliseconds::zero());
+        has_timeout = true;
+      }
+
+      MHD_UNSIGNED_LONG_LONG mhd_timeout;
+      if (MHD_get_timeout(parent_->daemon_, &mhd_timeout) == MHD_YES) {
+        std::cout << "MHD_get_timeout returned MHD_YES\n";
+        timeout = std::min(timeout, std::chrono::milliseconds(mhd_timeout));
+        has_timeout = true;
+      }
+
+      if (has_timeout) {
+        struct timeval tv = {
+            .tv_sec = timeout.count() / 1000LL,
+            .tv_usec = (timeout.count() - (tv.tv_sec * 1000LL)) * 1000LL
+        };
+
+        return tv;
+      }
+      else {
+        return std::nullopt;
+      }
+    }
+
+    struct Event {
+      std::chrono::time_point<std::chrono::steady_clock> deadline;
+      std::function<bool()> cb;
+    };
+    std::list<Event> events_;
     int efd_;
   };
 
-  MhdMessageloop& msgloop() { return msgloop_; }
+  EventLoop& event_loop() { return event_loop_; }
 
   bool run() {
 #ifdef RUN_WAIT
     do { MHD_run_wait(daemon_, 9999); } while (true);
     return true;
 #else
-    return msgloop_.run();
+    return event_loop_.run();
 #endif
   }
 
@@ -100,7 +162,8 @@ public:
 
   class Request {
   public:
-    Request(MHD_Connection *connection, const std::string& url, const std::string& method) :
+    Request(Httpd* parent, MHD_Connection *connection, const std::string& url, const std::string& method) :
+      parent_(parent),
       connection_(connection),
       url_(url),
       method_(method)
@@ -126,6 +189,7 @@ public:
       delete os_;
       delete sb_;
       MHD_resume_connection(connection_);
+      parent_->event_loop().signal();
     }
 
     const std::string& url() const { return url_; }
@@ -174,6 +238,7 @@ public:
 
   private:
     friend class Httpd;
+    Httpd *parent_;
     MHD_Connection *connection_;
     std::string url_;
     std::string method_;
@@ -221,7 +286,8 @@ public:
   using Handler = std::function<bool(Request&)>;
   using HandlerAsync = std::function<bool(std::shared_ptr<Request>)>;
 
-  Httpd& use(Handler&& handler) {
+  template<typename H>
+  Httpd& use(H&& handler) {
     handlers_.push_back(std::move(handler));
     return *this;
   }
@@ -230,6 +296,18 @@ public:
   Httpd& use(const std::string& url, Handler&& handler) {
     handlers_.push_back([url, h = std::move(handler)](Request& req) {
       if (url == req.url()) {
+        return h(req);
+      }
+      else {
+        return true;
+      }
+    });
+    return *this;
+  }
+
+  Httpd& use(const std::string& url, HandlerAsync&& handler) {
+    handlers_.push_back([url, h = std::move(handler)](std::shared_ptr<Request> req) {
+      if (url == req->url()) {
         return h(req);
       }
       else {
@@ -267,7 +345,7 @@ private:
     bool is_post = method == MHD_HTTP_METHOD_POST;
 
     if (nullptr == *con_cls) {
-      req = std::make_shared<Request>(connection, url, method);
+      req = std::make_shared<Request>(this, connection, url, method);
 
       if (is_post) {
         req->create_post_processor();
@@ -309,6 +387,6 @@ private:
     return MHD_YES;
   }
 
-    MhdMessageloop msgloop_;
+    EventLoop event_loop_;
     MHD_Daemon *daemon_;
   };
